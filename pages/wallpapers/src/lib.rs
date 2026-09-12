@@ -7,7 +7,7 @@ use image::imageops::FilterType;
 use image::{DynamicImage, ImageBuffer, ImageDecoder, ImageResult, Limits, Rgba, RgbaImage};
 use jxl_oxide::integration::JxlDecoder;
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
@@ -54,12 +54,19 @@ pub const DEFAULT_COLORS: &[Color] = &[
     }),
 ];
 
-pub async fn config() -> (Config, HashMap<String, (String, (u32, u32))>) {
-    let mut displays = HashMap::new();
+pub async fn config() -> (Config, BTreeMap<String, (String, String, (u32, u32))>) {
+    let mut displays = BTreeMap::new();
 
     if let Ok(list) = cosmic_randr_shell::list().await {
         for (_key, output) in list.outputs {
-            displays.insert(output.name, (output.model, output.physical));
+            displays.insert(
+                output.name,
+                (
+                    output.make.unwrap_or_else(|| "Unknown".to_string()),
+                    output.model,
+                    output.physical,
+                ),
+            );
         }
     }
 

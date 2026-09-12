@@ -54,7 +54,7 @@ struct OutputName(String);
 #[derive(Clone, Debug)]
 pub struct InitUpdate {
     service_config: wallpaper::Config,
-    displays: HashMap<String, (String, (u32, u32))>,
+    displays: BTreeMap<String, (String, String, (u32, u32))>,
 }
 
 /// Messages for the wallpaper view.
@@ -183,7 +183,9 @@ pub struct Page {
     selection: Context,
 
     /// When set, applys a config update after images are loaded.
-    update_config: Option<(usize, HashMap<String, (String, (u32, u32))>)>,
+    update_config: Option<(usize, BTreeMap<String, (String, String, (u32, u32))>)>,
+    /// Cached displays for EDID fallback (make/model) when creating wallpaper entries.
+    displays: BTreeMap<String, (String, String, (u32, u32))>,
 }
 
 impl page::Page<crate::pages::Message> for Page {
@@ -319,6 +321,7 @@ impl Default for Page {
             config,
             fit_options: vec![fl!("fill"), fl!("fit-to-screen")],
             outputs: SingleSelectModel::default(),
+            displays: BTreeMap::new(),
             rotation_options: vec![
                 // FIX: fluent is inserting extra unicode characters in formatting
                 fl!("x-minutes", number = 5)
@@ -515,10 +518,10 @@ impl Page {
     }
 
     /// Updates configuration from the wallpaper service.
-    fn wallpaper_service_config_update(&mut self, displays: HashMap<String, (String, (u32, u32))>) {
-        let sorted = displays.into_iter().collect::<BTreeMap<_, _>>();
+    fn wallpaper_service_config_update(&mut self, displays: BTreeMap<String, (String, String, (u32, u32))>) {
+        self.displays.clone_from(&displays);
         let mut first = None;
-        for (name, (_model, physical)) in sorted {
+        for (name, (_make, _model, physical)) in displays {
             let is_internal = "eDP-1" == name;
 
             let entity = self
@@ -659,11 +662,38 @@ impl Page {
                 .backgrounds
                 .iter()
                 .find(|entry| entry.output == output)
+                .or_else(|| {
+                    // EDID fallback: find by make/model if connector was renamed
+                    let (make, model, _) = self.displays.get(&output)?;
+                    self.wallpaper_service_config.backgrounds.iter().find(|e| {
+                        e.output_make.as_deref() == Some(make)
+                            && e.output_model.as_deref() == Some(model)
+                    })
+                })
+        };
+
+        // Determine make/model to store: prefer old_entry's EDID, fallback to current display
+        let (make, model) = if let Some(old) = old_entry {
+            if old.output_make.is_some() && old.output_model.is_some() {
+                (old.output_make.clone(), old.output_model.clone())
+            } else {
+                self.displays
+                    .get(&output)
+                    .map(|(make, model, _)| (Some(make.clone()), Some(model.clone())))
+                    .unwrap_or((None, None))
+            }
+        } else {
+            self.displays
+                .get(&output)
+                .map(|(make, model, _)| (Some(make.clone()), Some(model.clone())))
+                .unwrap_or((None, None))
         };
 
         let entry = Entry::new(output, wallpaper::Source::Path(path))
             .scaling_mode(scaling_mode)
-            .rotation_frequency(self.config.rotation_frequency);
+            .rotation_frequency(self.config.rotation_frequency)
+            .output_make(make)
+            .output_model(model);
 
         if let Some(old_entry) = old_entry {
             entry
