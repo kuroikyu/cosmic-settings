@@ -669,6 +669,8 @@ impl Page {
                 .sampling_method(old_entry.sampling_method)
                 .filter_method(old_entry.filter_method.clone())
                 .filter_by_theme(old_entry.filter_by_theme)
+                .output_make(old_entry.output_make.clone())
+                .output_model(old_entry.output_model.clone())
         } else {
             entry
         }
