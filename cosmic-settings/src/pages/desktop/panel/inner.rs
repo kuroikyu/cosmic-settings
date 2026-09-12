@@ -642,6 +642,7 @@ impl PageInner {
 
             Message::OutputAdded(name, output) => {
                 self.outputs.push(name.clone());
+                self.outputs[1..].sort();
                 self.outputs_map.insert(output.id(), (name, output));
                 return Task::none();
             }

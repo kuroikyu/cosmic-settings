@@ -7,7 +7,7 @@ pub mod widgets;
 pub use config::Config;
 use url::Url;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -516,8 +516,9 @@ impl Page {
 
     /// Updates configuration from the wallpaper service.
     fn wallpaper_service_config_update(&mut self, displays: HashMap<String, (String, (u32, u32))>) {
+        let sorted = displays.into_iter().collect::<BTreeMap<_, _>>();
         let mut first = None;
-        for (name, (_model, physical)) in displays {
+        for (name, (_model, physical)) in sorted {
             let is_internal = "eDP-1" == name;
 
             let entity = self
