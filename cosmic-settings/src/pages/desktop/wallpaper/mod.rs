@@ -7,7 +7,7 @@ pub mod widgets;
 pub use config::Config;
 use url::Url;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -316,7 +316,18 @@ impl Default for Page {
 
                 categories
             },
-            wallpaper_service_config: wallpaper::Config::default(),
+            wallpaper_service_config: {
+                // Load same_on_all synchronously to avoid ON->OFF animation on first frame
+                if let Ok(ctx) = cosmic_bg_config::context() {
+                    if let Ok(cfg) = wallpaper::Config::load(&ctx) {
+                        cfg
+                    } else {
+                        wallpaper::Config::default()
+                    }
+                } else {
+                    wallpaper::Config::default()
+                }
+            },
             color_model: ColorPickerModel::new(fl!("hex"), fl!("rgb"), None, Some(Color::WHITE)),
             config,
             fit_options: vec![fl!("fill"), fl!("fit-to-screen")],
@@ -393,9 +404,45 @@ impl Page {
     fn cache_display_image(&mut self) {
         self.cached_display_handle = None;
 
-        let choice = match self.selection.active {
+        // Preview should show the currently applied wallpaper for the active
+        // output, regardless of which gallery category is selected.
+        let output = self.config_output().unwrap_or("all");
+        let entry = if self.wallpaper_service_config.same_on_all {
+            Some(&self.wallpaper_service_config.default_background)
+        } else {
+            self.wallpaper_service_config
+                .backgrounds
+                .iter()
+                .find(|e| e.output == output)
+                .or_else(|| {
+                    let (make, model, _) = self.displays.get(output)?;
+                    self.wallpaper_service_config.backgrounds.iter().find(|e| {
+                        e.output_make.as_deref() == Some(make)
+                            && e.output_model.as_deref() == Some(model)
+                    })
+                })
+        };
+        let Some(entry) = entry else {
+            return;
+        };
+        // Try per-output entry first (category-independent)
+        let per_output_choice: Option<image::RgbaImage> = match &entry.source {
+            Source::Path(path) => {
+                if let Some(id) = self.wallpaper_id_from_path(path) {
+                    self.selection.display_images.get(id).cloned()
+                } else {
+                    // Direct load so preview works even when gallery doesn't contain this image
+                    // (e.g. Walls image while viewing Wallpapers category)
+                    image::open(path).ok().map(|d| d.to_rgba8())
+                }
+            }
+            Source::Color(_) => None,
+        };
+        let choice: Option<&image::RgbaImage> = per_output_choice
+            .as_ref()
+            .map(|img| img as &image::RgbaImage)
+            .or_else(|| match self.selection.active {
             Choice::Wallpaper(id) => self.selection.display_images.get(id),
-
             Choice::Slideshow => self
                 .config_output()
                 .and_then(|output| match self.config.current_image(output)? {
@@ -403,13 +450,11 @@ impl Page {
                         let id = self.wallpaper_id_from_path(&path)?;
                         Some(&self.selection.display_images[id])
                     }
-
                     Source::Color(_color) => None,
                 })
                 .or(self.selection.display_images.values().next()),
-
             Choice::Color(_) => None,
-        };
+        });
 
         let Some(image) = choice else {
             return;
@@ -579,15 +624,10 @@ impl Page {
             Category::Wallpapers => {
                 if self.config.current_folder.is_some() {
                     let _ = self.config.set_current_folder(None);
-                } else {
-                    self.select_first_wallpaper();
                 }
             }
 
-            Category::Colors => {
-                self.selection.active = Choice::Color(wallpaper::DEFAULT_COLORS[0].clone());
-                self.cache_display_image();
-            }
+            Category::Colors => {}
 
             Category::RecentFolder(id) => {
                 if let Some(path) = self.config.recent_folders().get(id).cloned()
@@ -951,7 +991,11 @@ impl Page {
 
             Message::Event(event) => match event {
                 WallpaperEvent::Loading => {
-                    self.selection = Context::default();
+                    // Don't wipe selection.active - keep preview stable across category switches.
+                    // Only clear per-category image caches; active will be validated in fix_active below.
+                    self.selection.paths.clear();
+                    self.selection.display_images.clear();
+                    self.selection.selection_handles.clear();
                 }
                 WallpaperEvent::Load {
                     path,
@@ -981,20 +1025,36 @@ impl Page {
                         _ => false,
                     };
                     if fix_active {
-                        self.selection.active =
-                            match self.wallpaper_service_config.default_background.source {
-                                Source::Path(ref path) if !path.is_dir() => self
-                                    .selection
-                                    .paths
-                                    .iter()
-                                    .find(|(_key, valid_path)| path == valid_path.as_path())
-                                    .map(|(key, _)| Choice::Wallpaper(key))
-                                    .unwrap_or_default(),
-                                Source::Path(_) => Choice::Slideshow,
-                                Source::Color(ref color) => {
-                                    self.selection.add_custom_color(color.clone());
-                                    Choice::Color(color.clone())
-                                }
+                        let output = self.config_output().unwrap_or("all");
+                        let entry = if self.wallpaper_service_config.same_on_all {
+                            Some(&self.wallpaper_service_config.default_background)
+                        } else {
+                            self.wallpaper_service_config
+                                .backgrounds
+                                .iter()
+                                .find(|e| e.output == output)
+                                .or_else(|| {
+                                    let (make, model, _) = self.displays.get(output)?;
+                                    self.wallpaper_service_config.backgrounds.iter().find(|e| {
+                                        e.output_make.as_deref() == Some(make)
+                                            && e.output_model.as_deref() == Some(model)
+                                    })
+                                })
+                        };
+                        self.selection.active = match entry.map(|e| &e.source) {
+                            Some(Source::Path(path)) if !path.is_dir() => self
+                                .selection
+                                .paths
+                                .iter()
+                                .find(|(_key, valid_path)| path == valid_path.as_path())
+                                .map(|(key, _)| Choice::Wallpaper(key))
+                                .unwrap_or_default(),
+                            Some(Source::Path(_)) => Choice::Slideshow,
+                            Some(Source::Color(color)) => {
+                                self.selection.add_custom_color(color.clone());
+                                Choice::Color(color.clone())
+                            }
+                            None => Choice::default(),
                             }
                     }
                 }
